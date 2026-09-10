@@ -7,8 +7,9 @@ compatibility_flags = ["nodejs_compat"]
 directory = "./dist"
 binding = "ASSETS"
 
-# Cloudflare R2 bucket for permanent photo uploads and public image serving
-[[r2_buckets]]
-binding = "PHOTOS_BUCKET"
-bucket_name = "vinayaka-photos"
-preview_bucket_name = "vinayaka-photos"
+# Cloudflare R2 bucket (Commented out until enabled in Cloudflare Dashboard):
+# [[r2_buckets]]
+# binding = "PHOTOS_BUCKET"
+# bucket_name = "vinayaka-photos"
+# preview_bucket_name = "vinayaka-photos"
+

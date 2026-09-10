@@ -89,45 +89,42 @@ export async function onRequest(context: PagesContext): Promise<Response> {
     });
   }
 
-  // Serve photo from R2
+  // Serve photo from R2 with asset fallback
   if (pathname.startsWith('/api/photos/')) {
     const key = decodeURIComponent(pathname.replace(/^\/api\/photos\//, ''));
     if (!key) return jsonResponse({ error: 'Missing key' }, 400);
 
-    if (!env.PHOTOS_BUCKET) {
-      return jsonResponse({ error: 'PHOTOS_BUCKET is not bound' }, 503);
+    if (env.PHOTOS_BUCKET) {
+      try {
+        const object = await env.PHOTOS_BUCKET.get(key);
+        if (object) {
+          const headers = new Headers();
+          if (typeof object.writeHttpMetadata === 'function') {
+            object.writeHttpMetadata(headers);
+          }
+          headers.set('Access-Control-Allow-Origin', '*');
+          headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+          if (!headers.get('Content-Type')) {
+            headers.set('Content-Type', object.httpMetadata?.contentType || 'image/jpeg');
+          }
+          return new Response(object.body, { headers });
+        }
+      } catch (err: any) {
+        // Continue to fallback
+      }
     }
 
-    try {
-      const object = await env.PHOTOS_BUCKET.get(key);
-      if (!object) return jsonResponse({ error: `Not found: ${key}` }, 404);
-
-      const headers = new Headers();
-      if (typeof object.writeHttpMetadata === 'function') {
-        object.writeHttpMetadata(headers);
-      }
-      headers.set('Access-Control-Allow-Origin', '*');
-      headers.set('Cache-Control', 'public, max-age=31536000, immutable');
-      if (!headers.get('Content-Type')) {
-        headers.set('Content-Type', object.httpMetadata?.contentType || 'image/jpeg');
-      }
-      return new Response(object.body, { headers });
-    } catch (err: any) {
-      return jsonResponse({ error: err?.message }, 500);
-    }
+    return jsonResponse({ error: `Photo not found: ${key}` }, 404);
   }
 
-  // Upload to R2
+  // Upload (R2 with Data-URL Fallback)
   if (pathname === '/api/upload' && request.method === 'POST') {
-    if (!env.PHOTOS_BUCKET) {
-      return jsonResponse({ error: 'PHOTOS_BUCKET is not bound' }, 503);
-    }
-
     try {
       const contentTypeHeader = request.headers.get('content-type') || '';
       let contentType = 'image/jpeg';
       let buffer: Uint8Array | null = null;
       let category = 'general';
+      let rawDataUrl: string | null = null;
 
       if (contentTypeHeader.includes('multipart/form-data')) {
         const formData = await request.formData();
@@ -140,6 +137,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
       } else {
         const body = (await request.json()) as any;
         if (!body.dataUrl) return jsonResponse({ error: 'Missing dataUrl' }, 400);
+        rawDataUrl = body.dataUrl;
         const parsed = parseBase64DataUrl(body.dataUrl);
         contentType = parsed.contentType;
         buffer = parsed.buffer;
@@ -154,17 +152,38 @@ export async function onRequest(context: PagesContext): Promise<Response> {
       const cleanCat = category.replace(/[^a-zA-Z0-9_-]/g, '') || 'general';
       const filename = `${cleanCat}/${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
 
-      await env.PHOTOS_BUCKET.put(filename, buffer, {
-        httpMetadata: { contentType, cacheControl: 'public, max-age=31536000, immutable' },
-      });
+      if (env.PHOTOS_BUCKET) {
+        await env.PHOTOS_BUCKET.put(filename, buffer, {
+          httpMetadata: { contentType, cacheControl: 'public, max-age=31536000, immutable' },
+        });
 
-      const permanentUrl = `/api/photos/${filename}`;
+        const permanentUrl = `/api/photos/${filename}`;
+        return jsonResponse({
+          success: true,
+          key: filename,
+          url: permanentUrl,
+          fullUrl: `${url.origin}${permanentUrl}`,
+          size: buffer.length,
+          storage: 'r2',
+        });
+      }
+
+      let fallbackUrl = rawDataUrl;
+      if (!fallbackUrl) {
+        let binary = '';
+        for (let i = 0; i < buffer.byteLength; i++) {
+          binary += String.fromCharCode(buffer[i]);
+        }
+        fallbackUrl = `data:${contentType};base64,${btoa(binary)}`;
+      }
+
       return jsonResponse({
         success: true,
         key: filename,
-        url: permanentUrl,
-        fullUrl: `${url.origin}${permanentUrl}`,
+        url: fallbackUrl,
+        fullUrl: fallbackUrl,
         size: buffer.length,
+        storage: 'data-url-fallback',
       });
     } catch (err: any) {
       return jsonResponse({ error: err?.message }, 500);

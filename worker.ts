@@ -154,54 +154,75 @@ export default {
       });
     }
 
-    // 3. Serve Photos directly from Cloudflare R2 (/api/photos/<key>)
+    // 3. Serve Photos (Direct from Cloudflare R2 with Asset Fallback)
     if (pathname.startsWith('/api/photos/')) {
       const key = decodeURIComponent(pathname.replace(/^\/api\/photos\//, ''));
       if (!key) {
         return jsonResponse({ error: 'Missing image key' }, 400);
       }
 
-      if (!env.PHOTOS_BUCKET) {
-        return jsonResponse({ error: 'Cloudflare R2 (PHOTOS_BUCKET) is not bound.' }, 503);
+      // If Cloudflare R2 is bound, fetch from R2 bucket
+      if (env.PHOTOS_BUCKET) {
+        try {
+          const object = await env.PHOTOS_BUCKET.get(key);
+          if (object) {
+            const headers = new Headers();
+            if (typeof object.writeHttpMetadata === 'function') {
+              object.writeHttpMetadata(headers);
+            }
+            headers.set('Access-Control-Allow-Origin', '*');
+            headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+            if (!headers.get('Content-Type')) {
+              headers.set('Content-Type', object.httpMetadata?.contentType || 'image/jpeg');
+            }
+            if (object.httpEtag) {
+              headers.set('ETag', object.httpEtag);
+            }
+            return new Response(object.body, { headers });
+          }
+        } catch {
+          // Fall through to asset fallback
+        }
       }
 
-      try {
-        const object = await env.PHOTOS_BUCKET.get(key);
-        if (!object) {
-          return jsonResponse({ error: `Image not found in R2: ${key}` }, 404);
-        }
+      // Resilient fallback: Try serving from static assets (e.g. bundled committee photos)
+      if (env.ASSETS && typeof env.ASSETS.fetch === 'function') {
+        const basename = key.split('/').pop() || key;
+        const candidatePaths = [
+          `/committee-photos/${basename}`,
+          `/committee-photos/${key}`,
+          `/${key}`,
+          `/${basename}`,
+        ];
 
-        const headers = new Headers();
-        if (typeof object.writeHttpMetadata === 'function') {
-          object.writeHttpMetadata(headers);
+        for (const candidate of candidatePaths) {
+          try {
+            const assetReq = new Request(new URL(candidate, request.url), request);
+            const assetRes = await env.ASSETS.fetch(assetReq);
+            if (assetRes.ok && assetRes.status !== 404) {
+              const headers = new Headers(assetRes.headers);
+              headers.set('Access-Control-Allow-Origin', '*');
+              headers.set('Cache-Control', 'public, max-age=86400');
+              return new Response(assetRes.body, { status: 200, headers });
+            }
+          } catch {
+            // continue
+          }
         }
-        headers.set('Access-Control-Allow-Origin', '*');
-        headers.set('Cache-Control', 'public, max-age=31536000, immutable');
-        if (!headers.get('Content-Type')) {
-          headers.set('Content-Type', object.httpMetadata?.contentType || 'image/jpeg');
-        }
-        if (object.httpEtag) {
-          headers.set('ETag', object.httpEtag);
-        }
-
-        return new Response(object.body, { headers });
-      } catch (err: any) {
-        return jsonResponse({ error: `Failed to stream image from R2: ${err?.message}` }, 500);
       }
+
+      return jsonResponse({ error: `Image not found: ${key}` }, 404);
     }
 
-    // 4. Permanent Image Upload to Cloudflare R2 (/api/upload)
+    // 4. Image Upload API (Cloudflare R2 with zero-crash Data-URL Fallback)
     if (pathname === '/api/upload' && request.method === 'POST') {
-      if (!env.PHOTOS_BUCKET) {
-        return jsonResponse({ error: 'Cloudflare R2 (PHOTOS_BUCKET) is not bound.' }, 503);
-      }
-
       try {
         const contentTypeHeader = request.headers.get('content-type') || '';
         let contentType = 'image/jpeg';
         let buffer: Uint8Array | null = null;
         let originalName = 'upload';
         let category = 'general';
+        let rawDataUrl: string | null = null;
 
         if (contentTypeHeader.includes('multipart/form-data')) {
           const formData = await request.formData();
@@ -219,6 +240,7 @@ export default {
           if (!body.dataUrl) {
             return jsonResponse({ error: 'Missing dataUrl in request payload' }, 400);
           }
+          rawDataUrl = body.dataUrl;
           const parsed = parseBase64DataUrl(body.dataUrl);
           contentType = parsed.contentType;
           buffer = parsed.buffer;
@@ -248,32 +270,57 @@ export default {
         const cleanCat = category.replace(/[^a-zA-Z0-9_-]/g, '') || 'general';
         const filename = `${cleanCat}/${Date.now()}-${Math.random().toString(36).substring(2, 8)}.${ext}`;
 
-        // Stream directly to Cloudflare R2 bucket
-        await env.PHOTOS_BUCKET.put(filename, buffer, {
-          httpMetadata: {
-            contentType,
-            cacheControl: 'public, max-age=31536000, immutable',
-          },
-          customMetadata: {
-            uploadedAt: new Date().toISOString(),
-            originalName,
-            category: cleanCat,
-          },
-        });
+        // 1. If Cloudflare R2 is enabled and bound, upload directly to R2 bucket
+        if (env.PHOTOS_BUCKET) {
+          await env.PHOTOS_BUCKET.put(filename, buffer, {
+            httpMetadata: {
+              contentType,
+              cacheControl: 'public, max-age=31536000, immutable',
+            },
+            customMetadata: {
+              uploadedAt: new Date().toISOString(),
+              originalName,
+              category: cleanCat,
+            },
+          });
 
-        const permanentUrl = `/api/photos/${filename}`;
-        const fullHttpsUrl = `${url.origin}${permanentUrl}`;
+          const permanentUrl = `/api/photos/${filename}`;
+          const fullHttpsUrl = `${url.origin}${permanentUrl}`;
+
+          return jsonResponse({
+            success: true,
+            key: filename,
+            url: permanentUrl,
+            fullUrl: fullHttpsUrl,
+            size: buffer.length,
+            contentType,
+            storage: 'r2',
+          });
+        }
+
+        // 2. Resilient Fallback: If R2 is not enabled on the Cloudflare account,
+        // create a valid data URI so photos still upload and display without crashing
+        let dataUrlToReturn = rawDataUrl;
+        if (!dataUrlToReturn) {
+          let binary = '';
+          const len = buffer.byteLength;
+          for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(buffer[i]);
+          }
+          dataUrlToReturn = `data:${contentType};base64,${btoa(binary)}`;
+        }
 
         return jsonResponse({
           success: true,
           key: filename,
-          url: permanentUrl,
-          fullUrl: fullHttpsUrl,
+          url: dataUrlToReturn,
+          fullUrl: dataUrlToReturn,
           size: buffer.length,
           contentType,
+          storage: 'data-url-fallback',
         });
       } catch (err: any) {
-        return jsonResponse({ error: `Upload to R2 failed: ${err?.message}` }, 500);
+        return jsonResponse({ error: `Upload failed: ${err?.message}` }, 500);
       }
     }
 

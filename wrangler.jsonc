@@ -9,10 +9,14 @@
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS"
-  },
+  }
 
-  // Cloudflare R2 Bucket for Permanent Photo Uploads & Public Image Serving
-  "r2_buckets": [
+  // NOTE: Cloudflare R2 Bucket binding is temporarily commented out below
+  // because R2 is not yet enabled on your Cloudflare account (code 10042).
+  // Once you enable R2 in Cloudflare Dashboard (Storage & Databases > R2),
+  // uncomment this block to activate permanent R2 storage.
+  /*
+  ,"r2_buckets": [
     {
       "binding": "PHOTOS_BUCKET",
       "bucket_name": "vinayaka-photos",
@@ -20,21 +24,21 @@
     }
   ],
 
-  // Optional Cloudflare D1 Database Binding (run npx wrangler d1 create vinayaka_db)
+  // Cloudflare D1 Database Binding (uncomment after running: npx wrangler d1 create vinayaka_db)
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "vinayaka_db",
-      "database_id": "vinayaka_db"
+      "database_id": "<YOUR-D1-DATABASE-UUID>"
     }
   ],
 
-  // Optional Cloudflare KV Namespace for quick key-value metadata storage
+  // Cloudflare KV Namespace (uncomment after running: npx wrangler kv:namespace create vinayaka_kv_store)
   "kv_namespaces": [
     {
       "binding": "APP_KV",
-      "id": "vinayaka_kv_store",
-      "preview_id": "vinayaka_kv_preview"
+      "id": "<YOUR-KV-NAMESPACE-ID>"
     }
   ]
+  */
 }
