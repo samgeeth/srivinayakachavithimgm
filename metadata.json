@@ -1,0 +1,8 @@
+{
+  "name": "Remix Sri Vinayaka Chavithi 2026",
+  "description": "World-class digital portal for Sri Vinayaka Chavithi 2026 by Maraigudem Youth with live updates, donations dashboard, interactive 3D temple particles, timeline, and gallery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
